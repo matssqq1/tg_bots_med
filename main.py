@@ -1,6 +1,7 @@
 import telebot
 from transformers import pipeline
 from googletrans import Translator
+from collections import defaultdict
 
 # Загрузка предобученной модели для анализа эмоций
 emotion_analysis = pipeline("text-classification", model="SamLowe/roberta-base-go_emotions")
@@ -49,6 +50,9 @@ bot = telebot.TeleBot(TOKEN)
 # Словарь для хранения состояний пользователей
 user_states = {}
 
+# Словарь для хранения сообщений пользователей
+user_messages = defaultdict(list)
+
 # Команда /start
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
@@ -56,7 +60,9 @@ def send_welcome(message):
         "👋 Привет! Я бот для анализа ментального здоровья и давления. "
         "Отправьте мне текст (например, свои мысли или чувства), "
         "и я помогу проанализировать его эмоциональную окраску.\n"
-        "Для анализа давления используйте команду /dawlenie"
+        "Для анализа давления используйте команду /dawlenie\n"
+        "Для анализа стресса используйте команду /stress\n"
+        "Результаты анализа не являются диагнозом и не заменяют профессиональную помощь."
     )
     bot.reply_to(message, welcome_message)
 
@@ -66,6 +72,14 @@ def start_pressure_analysis(message):
     chat_id = message.chat.id
     user_states[chat_id] = "awaiting_pressure_data"
     bot.reply_to(message, "Введите ваш возраст, систолическое и диастолическое давление через пробел, например: 30 120 80")
+
+# Команда /stress
+@bot.message_handler(commands=['stress'])
+def start_stress_analysis(message):
+    chat_id = message.chat.id
+    user_states[chat_id] = "awaiting_stress_messages"
+    user_messages[chat_id].clear()
+    bot.reply_to(message, "Пожалуйста, отправьте мне 5 сообщений о своих мыслях и чувствах для анализа стресса.")
 
 # Обработчик текстовых сообщений
 @bot.message_handler(func=lambda message: True)
@@ -92,6 +106,35 @@ def handle_messages(message):
             except ValueError:
                 bot.reply_to(message, "Введите корректные числовые значения для возраста, систолического и диастолического давления.")
             return
+        
+        if state == "awaiting_stress_messages":
+            if not user_text:
+                bot.reply_to(message, "Пожалуйста, отправьте текст для анализа.")
+                return
+            
+            # Переводим текст на английский
+            try:
+                translated_text = translator.translate(user_text, src="ru", dest="en").text
+            except Exception as e:
+                bot.reply_to(message, f"Ошибка перевода: {e}")
+                return
+            
+            # Анализируем эмоции переведенного текста
+            result = emotion_analysis(translated_text)[0]
+            emotion = result['label']
+            
+            # Сохраняем эмоцию
+            user_messages[chat_id].append(emotion)
+            
+            if len(user_messages[chat_id]) >= 5:
+                stress_result = analyze_stress(user_messages[chat_id])
+                bot.reply_to(message, stress_result)
+                del user_states[chat_id]
+                user_messages[chat_id].clear()
+            else:
+                remaining = 5 - len(user_messages[chat_id])
+                bot.reply_to(message, f"Осталось отправить {remaining} сообщений.")
+            return
     
     if not user_text:
         bot.reply_to(message, "Пожалуйста, отправьте текст для анализа.")
@@ -113,7 +156,7 @@ def handle_messages(message):
     emotion_ru = emotion_translation.get(emotion, "неизвестная эмоция")
 
     # Формируем ответ
-    response = f"по данному сообщению вы испытываете эмоцию: {emotion_ru}\nмоя увереность в точности ответа: {confidence:.2f}"
+    response = f"По данному сообщению вы испытываете эмоцию: {emotion_ru}\nМоя уверенность в точности ответа: {confidence:.2f}"
     bot.reply_to(message, response)
 
 # Функция для анализа давления в зависимости от возраста
@@ -141,6 +184,46 @@ def analyze_pressure_by_age(age, systolic, diastolic):
         return f"Низкое давление для вашего возраста ({age}). Рекомендуется обратиться к врачу."
     else:
         return f"Давление в норме для вашего возраста ({age})."
+
+# Функция для анализа стресса на основе эмоций
+def analyze_stress(emotions):
+    emotion_count = defaultdict(int)
+    
+    for emotion in emotions:
+        emotion_count[emotion] += 1
+    
+    total_messages = len(emotions)
+    stress_score = 0
+    
+    # Определяем веса для эмоций, связанных со стрессом
+    stress_emotions = {
+        "anger": 1.5,
+        "annoyance": 1.2,
+        "disappointment": 1.1,
+        "disapproval": 1.1,
+        "disgust": 1.2,
+        "embarrassment": 1.0,
+        "fear": 1.8,
+        "grief": 1.5,
+        "nervousness": 1.3,
+        "sadness": 1.2,
+        "stress": 2.0  # Можно добавить специальную категорию "stress", если есть такая метка в модели
+    }
+    
+    for emotion, count in emotion_count.items():
+        if emotion in stress_emotions:
+            stress_score += count * stress_emotions[emotion]
+    
+    stress_level = stress_score / total_messages
+    
+    if stress_level < 0.5:
+        stress_result = "Уровень стресса низкий."
+    elif 0.5 <= stress_level < 1.0:
+        stress_result = "Уровень стресса средний."
+    else:
+        stress_result = "Уровень стресса высокий. Рекомендуется обратиться к профессиональному психологу."
+    
+    return stress_result
 
 # Запуск бота
 if __name__ == "__main__":
