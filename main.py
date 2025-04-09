@@ -1,8 +1,6 @@
-import requests
-import time
+import telebot
 from transformers import pipeline
 from googletrans import Translator
-import asyncio
 
 # Загрузка предобученной модели для анализа эмоций
 emotion_analysis = pipeline("text-classification", model="SamLowe/roberta-base-go_emotions")
@@ -44,21 +42,79 @@ translator = Translator()
 
 # Вставьте свой токен API здесь
 TOKEN = "7903635056:AAHXpZ-VHzJY2C63q_UvrnIIDIpShfpG5FY"
-BASE_URL = f"https://api.telegram.org/bot{TOKEN}"
 
-# Функция для получения новых сообщений
-def get_updates(offset=None):
-    url = f"{BASE_URL}/getUpdates"
-    params = {"timeout": 100, "offset": offset}
-    response = requests.get(url, params=params)
-    return response.json()
+# Инициализация бота
+bot = telebot.TeleBot(TOKEN)
 
-# Функция для отправки сообщений
-def send_message(chat_id, text):
-    url = f"{BASE_URL}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text}
-    response = requests.post(url, json=payload)
-    return response.json()
+# Словарь для хранения состояний пользователей
+user_states = {}
+
+# Команда /start
+@bot.message_handler(commands=['start'])
+def send_welcome(message):
+    welcome_message = (
+        "👋 Привет! Я бот для анализа ментального здоровья и давления. "
+        "Отправьте мне текст (например, свои мысли или чувства), "
+        "и я помогу проанализировать его эмоциональную окраску.\n"
+        "Для анализа давления используйте команду /dawlenie"
+    )
+    bot.reply_to(message, welcome_message)
+
+# Команда /dawlenie
+@bot.message_handler(commands=['dawlenie'])
+def start_pressure_analysis(message):
+    chat_id = message.chat.id
+    user_states[chat_id] = "awaiting_pressure_data"
+    bot.reply_to(message, "Введите ваш возраст, систолическое и диастолическое давление через пробел, например: 30 120 80")
+
+# Обработчик текстовых сообщений
+@bot.message_handler(func=lambda message: True)
+def handle_messages(message):
+    chat_id = message.chat.id
+    user_text = message.text.strip()
+    
+    if chat_id in user_states:
+        state = user_states[chat_id]
+        
+        if state == "awaiting_pressure_data":
+            parts = user_text.split()
+            if len(parts) != 3:
+                bot.reply_to(message, "Введите корректные числовые значения для возраста, систолического и диастолического давления через пробел.")
+                return
+            
+            try:
+                age = int(parts[0])
+                systolic = int(parts[1])
+                diastolic = int(parts[2])
+                result = analyze_pressure_by_age(age, systolic, diastolic)
+                bot.reply_to(message, result)
+                del user_states[chat_id]
+            except ValueError:
+                bot.reply_to(message, "Введите корректные числовые значения для возраста, систолического и диастолического давления.")
+            return
+    
+    if not user_text:
+        bot.reply_to(message, "Пожалуйста, отправьте текст для анализа.")
+        return
+    
+    # Переводим текст на английский
+    try:
+        translated_text = translator.translate(user_text, src="ru", dest="en").text
+    except Exception as e:
+        bot.reply_to(message, f"Ошибка перевода: {e}")
+        return
+    
+    # Анализируем эмоции переведенного текста
+    result = emotion_analysis(translated_text)[0]
+    emotion = result['label']
+    confidence = result['score']
+    
+    # Переводим эмоцию на русский язык
+    emotion_ru = emotion_translation.get(emotion, "неизвестная эмоция")
+
+    # Формируем ответ
+    response = f"по данному сообщению вы испытываете эмоцию: {emotion_ru}\nмоя увереность в точности ответа: {confidence:.2f}"
+    bot.reply_to(message, response)
 
 # Функция для анализа давления в зависимости от возраста
 def analyze_pressure_by_age(age, systolic, diastolic):
@@ -86,86 +142,7 @@ def analyze_pressure_by_age(age, systolic, diastolic):
     else:
         return f"Давление в норме для вашего возраста ({age})."
 
-# Основной цикл бота
-async def main():
-    last_update_id = None
-    print("Бот запущен...")
-    
-    while True:
-        try:
-            # Получаем новые сообщения
-            updates = get_updates(last_update_id)
-            
-            if updates["result"]:
-                for update in updates["result"]:
-                    # Проверяем наличие ключа "message" в объекте update
-                    if "message" not in update:
-                        continue
-                    
-                    # Извлекаем данные из сообщения
-                    update_id = update["update_id"]
-                    chat_id = update["message"]["chat"]["id"]
-                    user_text = update["message"].get("text", "")
-                    
-                    # Обновляем ID последнего сообщения
-                    last_update_id = update_id + 1
-                    
-                    # Проверяем команду /start
-                    if user_text == "/start":
-                        welcome_message = (
-                            "👋 Привет! Я бот для анализа ментального здоровья и дваления. "
-                            "Отправьте мне текст (например, свои мысли или чувства), "
-                            "и я помогу проанализировать его эмоциональную окраску.\n"
-                            "Для анализа давления используйте команду /dawlenie <возраст> <систолическое> <диастолическое>"
-                        )
-                        send_message(chat_id, welcome_message)
-                        continue
-                    
-                    # Проверяем команду /dawlenie
-                    if user_text.startswith("/dawlenie"):
-                        parts = user_text.split()
-                        if len(parts) != 4:
-                            send_message(chat_id, "Используйте команду /dawlenие <возраст> <систолическое> <диастолическое>")
-                            continue
-                        
-                        try:
-                            age = int(parts[1])
-                            systolic = int(parts[2])
-                            diastolic = int(parts[3])
-                            result = analyze_pressure_by_age(age, systolic, diastolic)
-                            send_message(chat_id, result)
-                        except ValueError:
-                            send_message(chat_id, "Введите корректные числовые значения.")
-                        continue
-                    
-                    # Проверяем, что текст не пустой
-                    if not user_text.strip():
-                        send_message(chat_id, "Пожалуйста, отправьте текст для анализа.")
-                        continue
-                    
-                    # Переводим текст на английский
-                    try:
-                        translated_text = await translator.translate(user_text, src="ru", dest="en")
-                        translated_text = translated_text.text
-                    except Exception as e:
-                        send_message(chat_id, f"Ошибка перевода: {e}")
-                        continue
-                    
-                    # Анализируем эмоции переведенного текста
-                    result = emotion_analysis(translated_text)[0]
-                    emotion = result['label']
-                    confidence = result['score']
-                    
-                    # Переводим эмоцию на русский язык
-                    emotion_ru = emotion_translation.get(emotion, "неизвестная эмоция")
-                    
-                    # Формируем ответ
-                    response = f"Эмоция: {emotion_ru}\nУверенность: {confidence:.2f}"
-                    send_message(chat_id, response)
-        
-        except Exception as e:
-            print(f"Ошибка: {e}")
-            time.sleep(5)
-
+# Запуск бота
 if __name__ == "__main__":
-    asyncio.run(main())
+    print("Бот запущен...")
+    bot.polling(none_stop=True)
